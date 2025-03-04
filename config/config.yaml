@@ -1,0 +1,10 @@
+server:
+  host: "0.0.0.0"
+  http_port: 3001
+  ws_port: 8081
+
+influxdb:
+  url: "http://influxdb:8086"
+  token: "my-super-secret-token"
+  org: "myorg"
+  bucket: "trading"

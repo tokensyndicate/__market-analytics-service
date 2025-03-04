@@ -1,0 +1,20 @@
+# Binary
+bin/
+analytics-service
+
+# Environment
+.env
+
+# IDE
+.idea/
+.vscode/
+
+# Logs
+*.log
+
+# Dependencies
+vendor/
+
+# OS specific
+.DS_Store
+*.swp
