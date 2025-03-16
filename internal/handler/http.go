@@ -22,7 +22,7 @@ func NewHTTPHandler(analytics *service.AnalyticsService) *HTTPHandler {
 
 // Setup registers all HTTP routes
 func (h *HTTPHandler) Setup(router *mux.Router) {
-	router.HandleFunc("/api/v1/historical", h.GetHistoricalData).Methods("GET")
+	router.HandleFunc("/historical", h.GetHistoricalData).Methods("GET")
 }
 
 // GetHistoricalData handles requests for historical market data
