@@ -9,6 +9,7 @@ import (
 
 	"market-analytics-service/internal/influx"
 	"market-analytics-service/internal/postgres"
+	"market-analytics-service/pkg/metrics"
 	"market-analytics-service/pkg/models"
 
 	"github.com/rs/zerolog/log"
@@ -16,11 +17,12 @@ import (
 
 // AnalyticsService handles market data analytics and distribution
 type AnalyticsService struct {
-	stream         influx.Stream
-	influxClient   *influx.Client
-	postgresClient *postgres.Client
-	subscribers    sync.Map
-	cancel         context.CancelFunc
+	stream          influx.Stream
+	influxClient    *influx.Client
+	postgresClient  *postgres.Client
+	subscribers     sync.Map
+	cancel          context.CancelFunc
+	metricsProvider metrics.MetricsProvider
 }
 
 // NewAnalyticsService creates a new analytics service instance
@@ -32,16 +34,21 @@ func NewAnalyticsService(influxClient *influx.Client, postgresClient *postgres.C
 	)
 
 	svc := &AnalyticsService{
-		stream:         stream,
-		influxClient:   influxClient, // Store influxClient
-		postgresClient: postgresClient,
-		subscribers:    sync.Map{},
+		stream:          stream,
+		influxClient:    influxClient,
+		postgresClient:  postgresClient,
+		subscribers:     sync.Map{},
+		metricsProvider: metrics.NewMetricsProvider(influxClient),
 	}
 
 	_, cancel := context.WithCancel(context.Background())
 	svc.cancel = cancel
 
 	return svc
+}
+
+func (s *AnalyticsService) SubscribeToMetrics(ctx context.Context, params metrics.SubscriptionParams) (<-chan *models.MarketMetrics, error) {
+	return s.metricsProvider.SubscribeMetrics(ctx, params)
 }
 
 // Subscribe creates a new subscription for market data

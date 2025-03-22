@@ -76,3 +76,32 @@ type MarketData struct {
 	ClientID    string      `json:"client_id"`
 	Data        interface{} `json:"data"`
 }
+
+// MarketMetrics represents key market indicators and statistics
+type MarketMetrics struct {
+	// Price metrics
+	LastPrice    float64 `json:"last_price"`
+	PriceChange  float64 `json:"price_change"` // 24h change in percentage
+	HighPrice24h float64 `json:"high_price_24h"`
+	LowPrice24h  float64 `json:"low_price_24h"`
+
+	// Volume metrics
+	Volume24h    float64 `json:"volume_24h"`
+	VolumeChange float64 `json:"volume_change"` // 24h change in percentage
+
+	// Order book metrics
+	BidAskSpread float64 `json:"bid_ask_spread"`
+	MarketDepth  float64 `json:"market_depth"` // Total volume in order book
+
+	// Liquidity metrics
+	Liquidity float64 `json:"liquidity"` // Available liquidity at ±2% from mid price
+
+	// Trading activity
+	TradeCount24h int `json:"trade_count_24h"`
+
+	// Metadata
+	Timestamp   time.Time `json:"timestamp"`
+	Exchange    string    `json:"exchange"`
+	TradingPair string    `json:"trading_pair"`
+	ClientID    string    `json:"client_id"`
+}

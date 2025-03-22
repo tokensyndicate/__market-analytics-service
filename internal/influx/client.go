@@ -3,9 +3,8 @@ package influx
 import (
 	"context"
 	"fmt"
-	"time"
-
 	"market-analytics-service/pkg/models"
+	"time"
 
 	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
 	"github.com/influxdata/influxdb-client-go/v2/api"
@@ -32,10 +31,25 @@ func NewClient(url, token, org, bucket string) (*Client, error) {
 
 	return &Client{
 		client:   client,
-		queryAPI: client.QueryAPI(org), // QueryAPI возвращает api.QueryAPI
+		queryAPI: client.QueryAPI(org),
 		org:      org,
 		bucket:   bucket,
 	}, nil
+}
+
+// GetQueryAPI returns the QueryAPI interface
+func (c *Client) GetQueryAPI() api.QueryAPI {
+	return c.queryAPI
+}
+
+// GetBucket returns the configured bucket name
+func (c *Client) GetBucket() string {
+	return c.bucket
+}
+
+// GetOrg returns the configured organization name
+func (c *Client) GetOrg() string {
+	return c.org
 }
 
 // Close releases the client resources
