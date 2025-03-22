@@ -3,69 +3,127 @@ package service
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"market-analytics-service/internal/influx"
+	"market-analytics-service/internal/postgres"
 	"market-analytics-service/pkg/models"
+
+	"github.com/rs/zerolog/log"
 )
 
-// AnalyticsService handles business logic for market data analytics
+// AnalyticsService handles market data analytics and distribution
 type AnalyticsService struct {
-	influxClient *influx.Client
-	subscribers  map[string][]chan models.MarketData
-	mu           sync.RWMutex
-	cancel       context.CancelFunc
+	stream         influx.Stream
+	influxClient   *influx.Client
+	postgresClient *postgres.Client
+	subscribers    sync.Map
+	cancel         context.CancelFunc
 }
 
 // NewAnalyticsService creates a new analytics service instance
-func NewAnalyticsService(influxClient *influx.Client) *AnalyticsService {
+func NewAnalyticsService(influxClient *influx.Client, postgresClient *postgres.Client) *AnalyticsService {
+	stream := influx.NewStream(
+		influxClient,
+		100*time.Millisecond,
+		1000,
+	)
+
 	svc := &AnalyticsService{
-		influxClient: influxClient,
-		subscribers:  make(map[string][]chan models.MarketData),
+		stream:         stream,
+		influxClient:   influxClient, // Store influxClient
+		postgresClient: postgresClient,
+		subscribers:    sync.Map{},
 	}
 
-	// Используем контекст с отменой
-	ctx, cancel := context.WithCancel(context.Background())
-	go svc.distributeData(ctx)
-
-	// Сохраняем cancel для корректного завершения
+	_, cancel := context.WithCancel(context.Background())
 	svc.cancel = cancel
 
 	return svc
 }
 
 // Subscribe creates a new subscription for market data
-func (s *AnalyticsService) Subscribe(clientID string) (<-chan models.MarketData, error) {
-	dataChan := make(chan models.MarketData, 100)
-
-	s.mu.Lock()
-	if _, exists := s.subscribers[clientID]; !exists {
-		s.subscribers[clientID] = make([]chan models.MarketData, 0)
+func (s *AnalyticsService) Subscribe(ctx context.Context, clientID string) (<-chan models.MarketData, error) {
+	if clientID == "" {
+		return nil, fmt.Errorf("clientID is required")
 	}
-	s.subscribers[clientID] = append(s.subscribers[clientID], dataChan)
-	s.mu.Unlock()
 
-	return dataChan, nil
+	log.Debug().
+		Str("clientID", clientID).
+		Msg("Creating subscription")
+
+	// Create data channel with the stream
+	dataCh, err := s.stream.Subscribe(ctx, clientID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create stream: %w", err)
+	}
+
+	// Store subscription for management
+	s.subscribers.Store(clientID, dataCh)
+
+	return dataCh, nil
+}
+
+// resolveClientIDs determines which client IDs to subscribe to
+func (s *AnalyticsService) resolveClientIDs(ctx context.Context, userID, clientID string) ([]string, error) {
+	if clientID != "" {
+		return []string{clientID}, nil
+	}
+
+	if userID != "" {
+		// Fetch all client IDs associated with the user
+		clientIDs, err := s.postgresClient.GetUserClientIDs(ctx, userID)
+		if err != nil {
+			log.Error().Err(err).Str("userID", userID).Msg("Failed to get user client IDs")
+			return []string{}, nil
+		}
+		return clientIDs, nil
+	}
+
+	// If neither userID nor clientID provided, return empty slice for public data
+	return []string{}, nil
+}
+
+// buildClientIDsQuery creates a query filter for multiple client IDs
+func (s *AnalyticsService) buildClientIDsQuery(clientIDs []string) string {
+	if len(clientIDs) == 0 {
+		return `r["client_id"] == ""` // Query for public data only
+	}
+
+	// Build query for specific client IDs
+	conditions := make([]string, len(clientIDs)+1) // +1 for public data
+	conditions[0] = `r["client_id"] == ""`         // Always include public data
+
+	for i, id := range clientIDs {
+		conditions[i+1] = fmt.Sprintf(`r["client_id"] == "%s"`, id)
+	}
+
+	return strings.Join(conditions, " or ")
+}
+
+// createSubscriptionKey generates a unique key for subscription management
+func (s *AnalyticsService) createSubscriptionKey(userID string, clientIDs []string) string {
+	if len(clientIDs) == 0 {
+		return "public"
+	}
+	if len(clientIDs) == 1 {
+		return clientIDs[0]
+	}
+	return fmt.Sprintf("%s:all", userID)
 }
 
 // Unsubscribe removes a subscription
-func (s *AnalyticsService) Unsubscribe(clientID string, ch <-chan models.MarketData) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if channels, exists := s.subscribers[clientID]; exists {
-		for i, subCh := range channels {
-			if subCh == ch {
-				// Remove channel from slice
-				close(subCh)
-				s.subscribers[clientID] = append(channels[:i], channels[i+1:]...)
-				break
+func (s *AnalyticsService) Unsubscribe(subKey string, ch <-chan models.MarketData) {
+	if value, ok := s.subscribers.LoadAndDelete(subKey); ok {
+		if dataCh, ok := value.(<-chan models.MarketData); ok {
+			if dataCh == ch {
+				// Channel will be closed by the stream when context is cancelled
+				log.Debug().
+					Str("subKey", subKey).
+					Msg("Subscription removed")
 			}
-		}
-		// If no more subscribers for this client, remove the client entry
-		if len(s.subscribers[clientID]) == 0 {
-			delete(s.subscribers, clientID)
 		}
 	}
 }
@@ -78,7 +136,7 @@ func (s *AnalyticsService) GetHistoricalData(ctx context.Context, clientID strin
 		EndTime:   endTime,
 	}
 
-	data, err := s.influxClient.GetHistoricalData(ctx, params)
+	data, err := s.influxClient.GetHistoricalData(ctx, params) // Now we can use s.influxClient
 	if err != nil {
 		return nil, fmt.Errorf("failed to get historical data: %w", err)
 	}
@@ -86,66 +144,23 @@ func (s *AnalyticsService) GetHistoricalData(ctx context.Context, clientID strin
 	return data, nil
 }
 
-// distributeData handles the distribution of real-time data to subscribers
-func (s *AnalyticsService) distributeData(ctx context.Context) {
-	// Keep track of active subscriptions per client
-	subscriptions := make(map[string]<-chan models.MarketData)
-
-	for {
-		// Check and create subscriptions for clients
-		s.mu.RLock()
-		for clientID := range s.subscribers {
-			if _, exists := subscriptions[clientID]; !exists {
-				dataCh, err := s.influxClient.SubscribeToData(ctx, clientID)
-				if err != nil {
-					// Log error and continue
-					continue
-				}
-				subscriptions[clientID] = dataCh
-			}
-		}
-		s.mu.RUnlock()
-
-		// Distribute data to subscribers
-		for clientID, dataCh := range subscriptions {
-			select {
-			case data, ok := <-dataCh:
-				if !ok {
-					delete(subscriptions, clientID)
-					continue
-				}
-
-				s.mu.RLock()
-				subscribers := s.subscribers[clientID]
-				s.mu.RUnlock()
-
-				// Distribute to all subscribers for this client
-				for _, sub := range subscribers {
-					select {
-					case sub <- data:
-					default:
-						// Skip if subscriber's channel is full
-					}
-				}
-			case <-ctx.Done():
-				return
-			default:
-				// Continue to next client if no data available
-			}
-		}
+// Close performs cleanup of service resources
+func (s *AnalyticsService) Close() error {
+	// Cancel all ongoing operations
+	if s.cancel != nil {
+		s.cancel()
 	}
-}
 
-// Close cleans up resources
-func (s *AnalyticsService) Close() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// Close all subscriber channels
-	for _, channels := range s.subscribers {
-		for _, ch := range channels {
-			close(ch)
-		}
+	// Close the stream
+	if err := s.stream.Close(); err != nil {
+		return fmt.Errorf("failed to close stream: %w", err)
 	}
-	s.subscribers = make(map[string][]chan models.MarketData)
+
+	// Clear all subscriptions
+	s.subscribers.Range(func(key, value interface{}) bool {
+		s.subscribers.Delete(key)
+		return true
+	})
+
+	return nil
 }

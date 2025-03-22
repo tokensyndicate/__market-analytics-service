@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"net/http"
 	"time"
 
@@ -8,6 +9,7 @@ import (
 	"market-analytics-service/pkg/models"
 
 	"github.com/gorilla/websocket"
+	"github.com/rs/zerolog/log"
 )
 
 var upgrader = websocket.Upgrader{
@@ -30,50 +32,74 @@ func NewWSHandler(analytics *service.AnalyticsService) *WSHandler {
 
 // HandleWS handles WebSocket connections
 func (h *WSHandler) HandleWS(w http.ResponseWriter, r *http.Request) {
-	// Extract client_id from header
-	clientID := r.Header.Get("client_id")
+	clientID := r.Header.Get("X-User-ID")
+
+	log.Info().
+		Str("clientID", clientID).
+		Msg("WebSocket connection attempt")
+
+	// Validate clientID
+	if clientID == "" {
+		http.Error(w, "X-User-ID header is required", http.StatusUnauthorized)
+		return
+	}
 
 	// Upgrade HTTP connection to WebSocket
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		http.Error(w, "could not upgrade connection", http.StatusInternalServerError)
+		log.Error().Err(err).Msg("Failed to upgrade connection")
 		return
 	}
+
+	// Create context with cancellation for this connection
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
 	defer conn.Close()
 
 	// Subscribe to market data
-	dataCh, err := h.analytics.Subscribe(clientID)
+	dataCh, err := h.analytics.Subscribe(ctx, clientID)
 	if err != nil {
+		log.Error().Err(err).
+			Str("clientID", clientID).
+			Msg("Failed to subscribe to market data")
+
 		conn.WriteJSON(models.WSResponse{
 			Type:  "error",
 			Error: "failed to subscribe to market data",
 		})
 		return
 	}
-	defer h.analytics.Unsubscribe(clientID, dataCh)
-
-	// Setup ping/pong
-	conn.SetPingHandler(func(string) error {
-		return conn.WriteControl(websocket.PongMessage, []byte{}, time.Now().Add(time.Second))
-	})
 
 	// Create done channel for cleanup
 	done := make(chan struct{})
-	defer close(done)
 
-	// Start read pump to handle client messages (if needed)
+	// Start read pump to handle client disconnection
 	go func() {
-		defer func() {
-			done <- struct{}{}
-		}()
-
+		defer close(done)
 		for {
-			// Read message (required to handle client disconnection)
-			if _, _, err := conn.ReadMessage(); err != nil {
+			_, _, err := conn.ReadMessage()
+			if err != nil {
+				if websocket.IsUnexpectedCloseError(err,
+					websocket.CloseGoingAway,
+					websocket.CloseAbnormalClosure) {
+					log.Debug().
+						Err(err).
+						Str("clientID", clientID).
+						Msg("WebSocket read error")
+				}
 				return
 			}
 		}
 	}()
+
+	// Setup ping handler
+	conn.SetPingHandler(func(string) error {
+		return conn.WriteControl(
+			websocket.PongMessage,
+			[]byte{},
+			time.Now().Add(time.Second),
+		)
+	})
 
 	// Main loop - write data to client
 	for {
@@ -82,16 +108,33 @@ func (h *WSHandler) HandleWS(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			if err := conn.WriteJSON(models.WSResponse{
+			err := conn.WriteJSON(models.WSResponse{
 				Type:      data.Type,
 				ClientID:  data.ClientID,
 				Timestamp: data.Timestamp,
 				Data:      data.Data,
-			}); err != nil {
+			})
+			if err != nil {
+				log.Error().
+					Err(err).
+					Str("clientID", clientID).
+					Msg("Failed to write to WebSocket")
 				return
 			}
 		case <-done:
 			return
+		case <-ctx.Done():
+			return
 		}
 	}
+}
+
+func (h *WSHandler) getSubscriptionKey(userID, clientID string) string {
+	if clientID != "" {
+		return clientID
+	}
+	if userID != "" {
+		return userID + ":all"
+	}
+	return "public"
 }

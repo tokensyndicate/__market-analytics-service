@@ -9,6 +9,7 @@ import (
 type Config struct {
 	Server   ServerConfig   `mapstructure:"server"`
 	InfluxDB InfluxDBConfig `mapstructure:"influxdb"`
+	Postgres PostgresConfig `mapstructure:"postgres"`
 }
 
 type ServerConfig struct {
@@ -22,6 +23,14 @@ type InfluxDBConfig struct {
 	Token  string `mapstructure:"token"`
 	Org    string `mapstructure:"org"`
 	Bucket string `mapstructure:"bucket"`
+}
+
+type PostgresConfig struct {
+	Host     string `mapstructure:"host"`
+	Port     int    `mapstructure:"port"`
+	User     string `mapstructure:"user"`
+	Password string `mapstructure:"password"`
+	DBName   string `mapstructure:"dbname"`
 }
 
 func Load() (*Config, error) {
@@ -47,6 +56,13 @@ func Load() (*Config, error) {
 	viper.BindEnv("influxdb.token", "TS_ANALYTICS_INFLUXDB_TOKEN")
 	viper.BindEnv("influxdb.org", "TS_ANALYTICS_INFLUXDB_ORG")
 	viper.BindEnv("influxdb.bucket", "TS_ANALYTICS_INFLUXDB_BUCKET")
+
+	// Postgres env bindings
+	viper.BindEnv("postgres.host", "TS_ANALYTICS_POSTGRES_HOST")
+	viper.BindEnv("postgres.port", "TS_ANALYTICS_POSTGRES_PORT")
+	viper.BindEnv("postgres.user", "TS_ANALYTICS_POSTGRES_USER")
+	viper.BindEnv("postgres.password", "TS_ANALYTICS_POSTGRES_PASSWORD")
+	viper.BindEnv("postgres.dbname", "TS_ANALYTICS_POSTGRES_DBNAME")
 
 	if err := viper.ReadInConfig(); err != nil {
 		// Ignore if config file not found
@@ -81,5 +97,14 @@ func validateConfig(cfg *Config) error {
 	if cfg.InfluxDB.Bucket == "" {
 		return fmt.Errorf("influxdb bucket is required")
 	}
+
+	// Validate Postgres configuration
+	if cfg.Postgres.User == "" {
+		return fmt.Errorf("postgres user is required")
+	}
+	if cfg.Postgres.DBName == "" {
+		return fmt.Errorf("postgres database name is required")
+	}
+
 	return nil
 }

@@ -16,6 +16,7 @@ import (
 	"market-analytics-service/internal/config"
 	"market-analytics-service/internal/handler"
 	"market-analytics-service/internal/influx"
+	"market-analytics-service/internal/postgres"
 	"market-analytics-service/internal/service"
 )
 
@@ -42,8 +43,21 @@ func main() {
 	}
 	defer influxClient.Close()
 
+	// Initialize PostgreSQL client
+	postgresClient, err := postgres.NewClient(postgres.Config{
+		Host:     cfg.Postgres.Host,
+		Port:     cfg.Postgres.Port,
+		User:     cfg.Postgres.User,
+		Password: cfg.Postgres.Password,
+		DBName:   cfg.Postgres.DBName,
+	})
+	if err != nil {
+		log.Fatal().Err(err).Msg("Failed to create PostgreSQL client")
+	}
+	defer postgresClient.Close()
+
 	// Create analytics service
-	analyticsService := service.NewAnalyticsService(influxClient)
+	analyticsService := service.NewAnalyticsService(influxClient, postgresClient)
 	defer analyticsService.Close()
 
 	// Create handlers
@@ -61,6 +75,7 @@ func main() {
 
 	// Middleware for all routes
 	router.Use(loggingMiddleware)
+	router.Use(authMiddleware)
 	router.Use(corsMiddleware)
 
 	// Create HTTP server
@@ -124,18 +139,46 @@ func setupLogger() {
 	}
 }
 
+// Middleware to check and validate user ID
+func authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		clientID := r.Header.Get("X-User-ID")
+		if clientID == "" {
+			http.Error(w, "X-User-ID header is required", http.StatusUnauthorized)
+			return
+		}
+
+		// Store clientID in context for later use
+		ctx := context.WithValue(r.Context(), "clientID", clientID)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
 func loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
+		clientID := r.Header.Get("X-User-ID") // Updated from client_id to X-User-ID
 
-		// Create a custom response writer to capture status code
+		// Don't wrap WebSocket connections
+		if r.Header.Get("Upgrade") == "websocket" {
+			next.ServeHTTP(w, r)
+			log.Info().
+				Str("method", r.Method).
+				Str("path", r.URL.Path).
+				Str("clientID", clientID).
+				Dur("duration", time.Since(start)).
+				Msg("WebSocket connection handled")
+			return
+		}
+
+		// For non-WebSocket requests, use wrapped response writer
 		wrapped := wrapResponseWriter(w)
 		next.ServeHTTP(wrapped, r)
 
 		log.Info().
 			Str("method", r.Method).
 			Str("path", r.URL.Path).
-			Str("client_id", r.Header.Get("client_id")).
+			Str("clientID", clientID).
 			Int("status", wrapped.status).
 			Dur("duration", time.Since(start)).
 			Msg("Request processed")
@@ -146,7 +189,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, client_id")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-User-ID")
 
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)

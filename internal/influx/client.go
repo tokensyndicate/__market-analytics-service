@@ -9,6 +9,7 @@ import (
 
 	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
 	"github.com/influxdata/influxdb-client-go/v2/api"
+	"github.com/rs/zerolog/log"
 )
 
 // Client wraps InfluxDB client functionality
@@ -86,14 +87,18 @@ func (c *Client) GetHistoricalData(ctx context.Context, params QueryParams) ([]m
 }
 
 // SubscribeToData subscribes to real-time market data updates
-func (c *Client) SubscribeToData(ctx context.Context, clientID string) (<-chan models.MarketData, error) {
+func (c *Client) SubscribeToData(ctx context.Context, query string) (<-chan models.MarketData, error) {
 	dataCh := make(chan models.MarketData, 100)
 
-	query := fmt.Sprintf(`
-        from(bucket:"%s")
-            |> range(start: -1s)
-            |> filter(fn: (r) => r["client_id"] == "%s" or r["client_id"] == "")
-    `, c.bucket, clientID)
+	// Construct the complete Flux query with correct syntax
+	fluxQuery := fmt.Sprintf(`
+from(bucket: "%s")
+  |> range(start: -1s)
+`, c.bucket)
+
+	log.Debug().
+		Str("query", fluxQuery).
+		Msg("Creating InfluxDB subscription")
 
 	go func() {
 		defer close(dataCh)
@@ -103,13 +108,16 @@ func (c *Client) SubscribeToData(ctx context.Context, clientID string) (<-chan m
 			case <-ctx.Done():
 				return
 			default:
-				result, err := c.queryAPI.Query(ctx, query)
+				result, err := c.queryAPI.Query(ctx, fluxQuery)
 				if err != nil {
+					log.Error().Err(err).Msg("InfluxDB query error")
 					time.Sleep(time.Second)
 					continue
 				}
 
+				hasData := false
 				for result.Next() {
+					hasData = true
 					record := result.Record()
 
 					data := models.MarketData{
@@ -130,7 +138,9 @@ func (c *Client) SubscribeToData(ctx context.Context, clientID string) (<-chan m
 				}
 				result.Close()
 
-				time.Sleep(time.Millisecond * 100)
+				if !hasData {
+					time.Sleep(time.Millisecond * 100)
+				}
 			}
 		}
 	}()

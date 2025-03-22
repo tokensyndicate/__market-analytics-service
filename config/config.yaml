@@ -8,3 +8,10 @@ influxdb:
   token: "my-super-secret-token"
   org: "myorg"
   bucket: "trading"
+
+postgres:
+  host: "localhost"
+  port: 5432
+  user: "user"
+  password: "password"
+  database: "market_analytics"
