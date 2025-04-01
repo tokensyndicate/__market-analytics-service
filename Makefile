@@ -1,4 +1,12 @@
-.PHONY: build run test clean docker-build docker-run
+.PHONY: dev build run test clean docker-build docker-run
+
+AIR := $(shell command -v air 2> /dev/null)
+
+dev:
+ifndef AIR
+	$(error "air is not installed. Run: go install github.com/cosmtrek/air@latest")
+endif
+	air
 
 # Build the application
 build:
@@ -45,6 +53,7 @@ lint:
 .PHONY: help
 help:
 	@echo "Available commands:"
+	@echo "  make dev         - Run the application with air"
 	@echo "  make build       - Build the application"
 	@echo "  make run        - Run the application locally"
 	@echo "  make test       - Run tests"

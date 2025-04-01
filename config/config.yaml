@@ -4,14 +4,10 @@ server:
   ws_port: 8081
 
 influxdb:
-  url: "http://influxdb:8086"
+  url: "http://127.0.0.1:8086"
   token: "my-super-secret-token"
   org: "myorg"
-  bucket: "trading"
-
-postgres:
-  host: "localhost"
-  port: 5432
-  user: "user"
-  password: "password"
-  database: "market_analytics"
+  buckets:
+    candles: "trading_candles"
+    orderbook: "trading_orderbook"
+    orderbook_agg: "trading_orderbook_agg"

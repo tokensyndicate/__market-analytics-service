@@ -1,0 +1,25 @@
+FROM golang:1.23-alpine
+
+WORKDIR /app
+
+# Install development tools
+RUN apk add --no-cache git make gcc musl-dev \
+    && go install github.com/air-verse/air@latest
+
+# Copy go mod files
+COPY go.mod go.sum ./
+
+# Initialize modules and vendor
+RUN go mod download && \
+    go mod tidy && \
+    go mod verify && \
+    go mod vendor
+
+# Create directory for air tmp files
+RUN mkdir -p /app/tmp
+
+EXPOSE 3001 8081
+
+# Run air with mod=vendor
+ENV GOFLAGS="-mod=vendor"
+CMD ["air", "-c", ".air.toml"]

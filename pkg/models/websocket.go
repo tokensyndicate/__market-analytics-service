@@ -9,10 +9,21 @@ const (
 	WSTypeUnsubscribe WSMessageType = "unsubscribe"
 
 	// Data types
-	WSTypeMetrics WSMessageType = "metrics"
-	WSTypeError   WSMessageType = "error"
+	WSTypeCandles      WSMessageType = "candles"
+	WSTypeOrderBook    WSMessageType = "orderbook"
+	WSTypeOrderBookAgg WSMessageType = "orderbook_agg"
+	WSTypeAlert        WSMessageType = "alert"
 )
 
+// WSMessage представляет базовую структуру WebSocket сообщения
+type WSMessage struct {
+	Type      WSMessageType `json:"type"`
+	Timestamp string        `json:"timestamp"`
+	Data      interface{}   `json:"data"`
+	Error     string        `json:"error,omitempty"`
+}
+
+// ---- old code ----
 // WSMetricsRequest represents a metrics subscription request
 type WSMetricsRequest struct {
 	Type        WSMessageType `json:"type"`

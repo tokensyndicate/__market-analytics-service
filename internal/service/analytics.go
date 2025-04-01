@@ -3,12 +3,10 @@ package service
 import (
 	"context"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
 	"market-analytics-service/internal/influx"
-	"market-analytics-service/internal/postgres"
 	"market-analytics-service/pkg/metrics"
 	"market-analytics-service/pkg/models"
 
@@ -19,14 +17,13 @@ import (
 type AnalyticsService struct {
 	stream          influx.Stream
 	influxClient    *influx.Client
-	postgresClient  *postgres.Client
 	subscribers     sync.Map
 	cancel          context.CancelFunc
 	metricsProvider metrics.MetricsProvider
 }
 
 // NewAnalyticsService creates a new analytics service instance
-func NewAnalyticsService(influxClient *influx.Client, postgresClient *postgres.Client) *AnalyticsService {
+func NewAnalyticsService(influxClient *influx.Client) *AnalyticsService {
 	stream := influx.NewStream(
 		influxClient,
 		100*time.Millisecond,
@@ -36,7 +33,6 @@ func NewAnalyticsService(influxClient *influx.Client, postgresClient *postgres.C
 	svc := &AnalyticsService{
 		stream:          stream,
 		influxClient:    influxClient,
-		postgresClient:  postgresClient,
 		subscribers:     sync.Map{},
 		metricsProvider: metrics.NewMetricsProvider(influxClient),
 	}
@@ -71,43 +67,6 @@ func (s *AnalyticsService) Subscribe(ctx context.Context, clientID string) (<-ch
 	s.subscribers.Store(clientID, dataCh)
 
 	return dataCh, nil
-}
-
-// resolveClientIDs determines which client IDs to subscribe to
-func (s *AnalyticsService) resolveClientIDs(ctx context.Context, userID, clientID string) ([]string, error) {
-	if clientID != "" {
-		return []string{clientID}, nil
-	}
-
-	if userID != "" {
-		// Fetch all client IDs associated with the user
-		clientIDs, err := s.postgresClient.GetUserClientIDs(ctx, userID)
-		if err != nil {
-			log.Error().Err(err).Str("userID", userID).Msg("Failed to get user client IDs")
-			return []string{}, nil
-		}
-		return clientIDs, nil
-	}
-
-	// If neither userID nor clientID provided, return empty slice for public data
-	return []string{}, nil
-}
-
-// buildClientIDsQuery creates a query filter for multiple client IDs
-func (s *AnalyticsService) buildClientIDsQuery(clientIDs []string) string {
-	if len(clientIDs) == 0 {
-		return `r["client_id"] == ""` // Query for public data only
-	}
-
-	// Build query for specific client IDs
-	conditions := make([]string, len(clientIDs)+1) // +1 for public data
-	conditions[0] = `r["client_id"] == ""`         // Always include public data
-
-	for i, id := range clientIDs {
-		conditions[i+1] = fmt.Sprintf(`r["client_id"] == "%s"`, id)
-	}
-
-	return strings.Join(conditions, " or ")
 }
 
 // createSubscriptionKey generates a unique key for subscription management

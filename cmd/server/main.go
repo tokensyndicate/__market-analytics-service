@@ -16,8 +16,8 @@ import (
 	"market-analytics-service/internal/config"
 	"market-analytics-service/internal/handler"
 	"market-analytics-service/internal/influx"
-	"market-analytics-service/internal/postgres"
 	"market-analytics-service/internal/service"
+	"market-analytics-service/internal/ws"
 )
 
 func main() {
@@ -36,33 +36,27 @@ func main() {
 		cfg.InfluxDB.URL,
 		cfg.InfluxDB.Token,
 		cfg.InfluxDB.Org,
-		cfg.InfluxDB.Bucket,
+		influx.Buckets{
+			Candles:      cfg.InfluxDB.Buckets.Candles,
+			OrderBook:    cfg.InfluxDB.Buckets.OrderBook,
+			OrderBookAgg: cfg.InfluxDB.Buckets.OrderBookAgg,
+		},
 	)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to create InfluxDB client")
 	}
 	defer influxClient.Close()
 
-	// Initialize PostgreSQL client
-	postgresClient, err := postgres.NewClient(postgres.Config{
-		Host:     cfg.Postgres.Host,
-		Port:     cfg.Postgres.Port,
-		User:     cfg.Postgres.User,
-		Password: cfg.Postgres.Password,
-		DBName:   cfg.Postgres.DBName,
-	})
-	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to create PostgreSQL client")
-	}
-	defer postgresClient.Close()
-
 	// Create analytics service
-	analyticsService := service.NewAnalyticsService(influxClient, postgresClient)
+	analyticsService := service.NewAnalyticsService(influxClient)
 	defer analyticsService.Close()
 
-	// Create handlers
+	// Создаем менеджер подписок
+	subscriptionManager := ws.NewSubscriptionManager(influxClient)
+
+	// Создаем обработчики
 	httpHandler := handler.NewHTTPHandler(analyticsService)
-	wsHandler := handler.NewWSHandler(analyticsService)
+	wsHandler := handler.NewWSHandler(subscriptionManager)
 
 	// Setup router
 	router := mux.NewRouter()

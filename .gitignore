@@ -18,3 +18,6 @@ vendor/
 # OS specific
 .DS_Store
 *.swp
+
+tmp/
+.air.toml
