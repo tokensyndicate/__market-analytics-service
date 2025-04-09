@@ -2,6 +2,7 @@ package service
 
 import (
 	"market-analytics-service/pkg/models"
+	"math"
 	"sort"
 	"strconv"
 	"time"
@@ -85,42 +86,125 @@ func (t *DataTransformer) TransformOrderBook(rawData []models.MarketData) models
 		Int("rawDataLength", len(rawData)).
 		Msg("Starting order book transformation")
 
+	// Временные карты для группировки объемов по ценам
+	bidMap := make(map[float64]float64)
+	askMap := make(map[float64]float64)
+
 	for _, data := range rawData {
 		if values, ok := data.Data.(map[string]interface{}); ok {
-			side := values["side"].(string)
-			price := values["price"].(float64)
-			volume := values["volume"].(float64)
-			level := values["level"].(float64)
+			side, ok1 := values["side"].(string)
+			price, ok2 := values["price"].(float64)
+			volume, ok3 := values["volume"].(float64)
+
+			if !ok1 || !ok2 || !ok3 {
+				log.Debug().
+					Interface("values", values).
+					Msg("Invalid order book entry data types")
+				continue
+			}
 
 			log.Debug().
 				Str("side", side).
 				Float64("price", price).
 				Float64("volume", volume).
-				Float64("level", level).
 				Msg("Processing order book entry")
 
 			if volume > 0 {
 				if side == "bid" {
-					result.Bids = append(result.Bids, [2]float64{price, volume})
+					bidMap[price] += volume
 				} else if side == "ask" {
-					result.Asks = append(result.Asks, [2]float64{price, volume})
+					askMap[price] += volume
 				}
 			}
 		}
 	}
 
-	// Сортируем бидыи аски
-	sort.Slice(result.Bids, func(i, j int) bool {
-		return result.Bids[i][0] > result.Bids[j][0] // По убыванию
+	// Проверка на отрицательный спред
+	var highestBid float64
+	var lowestAsk float64 = math.MaxFloat64
+
+	for price := range bidMap {
+		if price > highestBid {
+			highestBid = price
+		}
+	}
+
+	for price := range askMap {
+		if price < lowestAsk {
+			lowestAsk = price
+		}
+	}
+
+	// Если обнаружен отрицательный спред, исправляем его
+	if highestBid >= lowestAsk && highestBid > 0 && lowestAsk < math.MaxFloat64 {
+		log.Warn().
+			Float64("highestBid", highestBid).
+			Float64("lowestAsk", lowestAsk).
+			Msg("Negative spread detected, cleaning order book")
+
+		for price := range bidMap {
+			if price >= lowestAsk {
+				delete(bidMap, price)
+			}
+		}
+
+		for price := range askMap {
+			if price <= highestBid {
+				delete(askMap, price)
+			}
+		}
+	}
+
+	// Конвертируем карты в слайсы для сортировки
+	bidPrices := make([]float64, 0, len(bidMap))
+	askPrices := make([]float64, 0, len(askMap))
+
+	for price := range bidMap {
+		bidPrices = append(bidPrices, price)
+	}
+
+	for price := range askMap {
+		askPrices = append(askPrices, price)
+	}
+
+	// Сортируем цены
+	sort.Slice(bidPrices, func(i, j int) bool {
+		return bidPrices[i] > bidPrices[j] // По убыванию для бидов
 	})
-	sort.Slice(result.Asks, func(i, j int) bool {
-		return result.Asks[i][0] < result.Asks[j][0] // По возрастанию
+	sort.Slice(askPrices, func(i, j int) bool {
+		return askPrices[i] < askPrices[j] // По возрастанию для асков
 	})
+
+	// Аккумулируем объемы
+	var accumulatedBidVolume float64
+	for _, price := range bidPrices {
+		accumulatedBidVolume += bidMap[price]
+		result.Bids = append(result.Bids, [2]float64{price, accumulatedBidVolume})
+	}
+
+	var accumulatedAskVolume float64
+	for _, price := range askPrices {
+		accumulatedAskVolume += askMap[price]
+		result.Asks = append(result.Asks, [2]float64{price, accumulatedAskVolume})
+	}
+
+	// Проверяем, что объемы строго возрастают
+	for i := 1; i < len(result.Bids); i++ {
+		if result.Bids[i][1] < result.Bids[i-1][1] {
+			result.Bids[i][1] = result.Bids[i-1][1]
+		}
+	}
+
+	for i := 1; i < len(result.Asks); i++ {
+		if result.Asks[i][1] < result.Asks[i-1][1] {
+			result.Asks[i][1] = result.Asks[i-1][1]
+		}
+	}
 
 	log.Info().
 		Int("bidsCount", len(result.Bids)).
 		Int("asksCount", len(result.Asks)).
-		Msg("Order book transformation completed")
+		Msg("Order book transformation completed with accumulated volumes")
 
 	return result
 }

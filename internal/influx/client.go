@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"market-analytics-service/pkg/models"
+	"math"
 	"sort"
 	"time"
 
@@ -325,22 +326,22 @@ from(bucket: "%s")
 }
 
 func (c *Client) GetLatestOrderBook(ctx context.Context, exchange, tradingPair string) (*models.OrderBook, error) {
-	// Сначала выведем полный запрос в лог
+	// Получаем данные за последние 1 секунду для самых свежих данных
 	query := fmt.Sprintf(`
 from(bucket: "%s")
-    |> range(start: -5s)
+    |> range(start: -1s)
     |> filter(fn: (r) => r["_measurement"] == "orderbook")
     |> filter(fn: (r) => r["exchange"] == "%s")
     |> filter(fn: (r) => r["trading_pair"] == "%s")
     |> last()
 `, c.buckets.OrderBook, exchange, tradingPair)
 
-	log.Info(). // Изменим уровень лога на Info для отладки
-			Str("bucket", c.buckets.OrderBook).
-			Str("exchange", exchange).
-			Str("tradingPair", tradingPair).
-			Str("query", query).
-			Msg("Debug InfluxDB query")
+	log.Info().
+		Str("bucket", c.buckets.OrderBook).
+		Str("exchange", exchange).
+		Str("tradingPair", tradingPair).
+		Str("query", query).
+		Msg("Debug InfluxDB query")
 
 	result, err := c.queryAPI.Query(ctx, query)
 	if err != nil {
@@ -356,8 +357,18 @@ from(bucket: "%s")
 		Asks:        make([]models.OrderBookRow, 0),
 	}
 
-	bids := make(map[float64]float64)
-	asks := make(map[float64]float64)
+	bids := make(map[float64]struct {
+		Volume      float64
+		TotalVolume float64
+		Level       int
+	})
+
+	asks := make(map[float64]struct {
+		Volume      float64
+		TotalVolume float64
+		Level       int
+	})
+
 	var lastTimestamp time.Time
 
 	for result.Next() {
@@ -373,6 +384,13 @@ from(bucket: "%s")
 		side := record.ValueByKey("side").(string)
 		price := record.ValueByKey("price").(float64)
 		volume := record.ValueByKey("volume").(float64)
+		level := record.ValueByKey("level").(int)
+
+		// Получаем аккумулированный объем, если доступен
+		totalVolume, ok := record.ValueByKey("total_volume").(float64)
+		if !ok {
+			totalVolume = 0 // Если поле отсутствует или нулевое
+		}
 
 		if volume <= 0 {
 			continue
@@ -380,9 +398,25 @@ from(bucket: "%s")
 
 		switch side {
 		case "bid":
-			bids[price] = volume
+			bids[price] = struct {
+				Volume      float64
+				TotalVolume float64
+				Level       int
+			}{
+				Volume:      volume,
+				TotalVolume: totalVolume,
+				Level:       level,
+			}
 		case "ask":
-			asks[price] = volume
+			asks[price] = struct {
+				Volume      float64
+				TotalVolume float64
+				Level       int
+			}{
+				Volume:      volume,
+				TotalVolume: totalVolume,
+				Level:       level,
+			}
 		}
 	}
 
@@ -390,31 +424,121 @@ from(bucket: "%s")
 		return nil, fmt.Errorf("error during query execution: %w", err)
 	}
 
-	// Конвертируем карты в отсортированные слайсы
-	bidPrices := make([]float64, 0, len(bids))
+	// Проверка на пустой ордербук
+	if len(bids) == 0 && len(asks) == 0 {
+		return nil, fmt.Errorf("empty orderbook for %s on %s", tradingPair, exchange)
+	}
+
+	// Проверка на отрицательный спред
+	var highestBid float64
+	var lowestAsk float64 = math.MaxFloat64
+
 	for price := range bids {
-		bidPrices = append(bidPrices, price)
+		if price > highestBid {
+			highestBid = price
+		}
 	}
-	sort.Sort(sort.Reverse(sort.Float64Slice(bidPrices)))
 
-	askPrices := make([]float64, 0, len(asks))
 	for price := range asks {
-		askPrices = append(askPrices, price)
+		if price < lowestAsk {
+			lowestAsk = price
+		}
 	}
-	sort.Float64s(askPrices)
 
-	// Формируем OrderBook
-	for _, price := range bidPrices {
+	// Если спред отрицательный, удаляем конфликтующие ордера
+	if highestBid >= lowestAsk && highestBid > 0 && lowestAsk < math.MaxFloat64 {
+		log.Warn().
+			Float64("highestBid", highestBid).
+			Float64("lowestAsk", lowestAsk).
+			Str("exchange", exchange).
+			Str("tradingPair", tradingPair).
+			Msg("Negative spread detected, cleaning order book")
+
+		for price := range bids {
+			if price >= lowestAsk {
+				delete(bids, price)
+			}
+		}
+
+		for price := range asks {
+			if price <= highestBid {
+				delete(asks, price)
+			}
+		}
+	}
+
+	// Конвертируем карты в отсортированные слайсы, сортируя по уровню
+	type PriceLevel struct {
+		Price       float64
+		Volume      float64
+		TotalVolume float64
+		Level       int
+	}
+
+	bidLevels := make([]PriceLevel, 0, len(bids))
+	for price, data := range bids {
+		bidLevels = append(bidLevels, PriceLevel{
+			Price:       price,
+			Volume:      data.Volume,
+			TotalVolume: data.TotalVolume,
+			Level:       data.Level,
+		})
+	}
+	// Сортируем по уровню, чтобы сохранить порядок из ордербука
+	sort.Slice(bidLevels, func(i, j int) bool {
+		return bidLevels[i].Level < bidLevels[j].Level
+	})
+
+	askLevels := make([]PriceLevel, 0, len(asks))
+	for price, data := range asks {
+		askLevels = append(askLevels, PriceLevel{
+			Price:       price,
+			Volume:      data.Volume,
+			TotalVolume: data.TotalVolume,
+			Level:       data.Level,
+		})
+	}
+	// Сортируем по уровню, чтобы сохранить порядок из ордербука
+	sort.Slice(askLevels, func(i, j int) bool {
+		return askLevels[i].Level < askLevels[j].Level
+	})
+
+	// Заполняем результат, используя предрассчитанные аккумулированные объемы
+	// если они доступны, иначе рассчитываем их на лету
+
+	// Для bids
+	var accumulatedBidVolume float64
+	for _, level := range bidLevels {
+		if level.TotalVolume > 0 {
+			// Используем предрассчитанный аккумулированный объем
+			accumulatedBidVolume = level.TotalVolume
+		} else {
+			// Рассчитываем на лету (backwards compatibility)
+			accumulatedBidVolume += level.Volume
+		}
+
 		ob.Bids = append(ob.Bids, models.OrderBookRow{
-			Price:  fmt.Sprintf("%.8f", price),
-			Volume: fmt.Sprintf("%.8f", bids[price]),
+			Price:       fmt.Sprintf("%.8f", level.Price),
+			Volume:      fmt.Sprintf("%.8f", level.Volume),
+			TotalVolume: fmt.Sprintf("%.8f", accumulatedBidVolume),
 		})
 	}
 
-	for _, price := range askPrices {
+	// Для asks
+	var accumulatedAskVolume float64
+	for _, level := range askLevels {
+		if level.TotalVolume > 0 {
+			// Используем предрассчитанный аккумулированный объем
+			accumulatedAskVolume = level.TotalVolume
+		} else {
+			// Рассчитываем на лету (backwards compatibility)
+			accumulatedAskVolume += level.Volume
+		}
+
 		ob.Asks = append(ob.Asks, models.OrderBookRow{
-			Price:  fmt.Sprintf("%.8f", price),
-			Volume: fmt.Sprintf("%.8f", asks[price]),
+			Price:       fmt.Sprintf("%.8f", level.Price),
+			Volume:      fmt.Sprintf("%.8f", level.Volume),
+			TotalVolume: fmt.Sprintf("%.8f", accumulatedAskVolume),
 		})
 	}
 
@@ -424,7 +548,7 @@ from(bucket: "%s")
 		Int("bids", len(ob.Bids)).
 		Int("asks", len(ob.Asks)).
 		Time("timestamp", ob.Timestamp).
-		Msg("Order book retrieved successfully")
+		Msg("Order book retrieved successfully with both original and accumulated volumes")
 
 	return ob, nil
 }

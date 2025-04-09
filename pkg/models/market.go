@@ -56,8 +56,9 @@ type Candle struct {
 
 // OrderBookRow represents a single level in the order book
 type OrderBookRow struct {
-	Price  string `json:"price"`
-	Volume string `json:"volume"`
+	Price       string `json:"price"`
+	Volume      string `json:"volume"`
+	TotalVolume string `json:"totalVolume"`
 }
 
 // OrderBook represents the current state of the order book

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -295,15 +294,9 @@ func (sm *SubscriptionManager) streamOrderBook(ctx context.Context, conn *Connec
 		Str("tradingPair", sub.TradingPair).
 		Msg("Starting order book stream")
 
-	// Локальное состояние книги ордеров
-	orderBookState := map[string]map[float64]float64{
-		"bid": make(map[float64]float64),
-		"ask": make(map[float64]float64),
-	}
-
 	// Создаем контекст с отменой
 	streamCtx, cancel := context.WithCancel(ctx)
-	defer cancel() // Гарантируем отмену контекста при выходе из функции
+	defer cancel()
 
 	// Создаем каналы для корректного завершения всех горутин
 	done := make(chan struct{})
@@ -327,16 +320,15 @@ func (sm *SubscriptionManager) streamOrderBook(ctx context.Context, conn *Connec
 		}
 	}()
 
-	// Ticker для запросов данных
+	// Структуры для хранения состояния стакана
+	var orderBookState = map[string]map[float64]float64{
+		"bid": make(map[float64]float64),
+		"ask": make(map[float64]float64),
+	}
+
+	// Ticker для запросов данных и обновлений
 	dataQueryTicker := time.NewTicker(1 * time.Second)
 	defer dataQueryTicker.Stop()
-
-	// Ticker для отправки обновлений
-	updateTicker := time.NewTicker(2 * time.Second)
-	defer updateTicker.Stop()
-
-	// Последняя временная метка
-	var lastTimestamp time.Time
 
 	for {
 		select {
@@ -349,7 +341,6 @@ func (sm *SubscriptionManager) streamOrderBook(ctx context.Context, conn *Connec
 			return
 
 		case <-dataQueryTicker.C:
-			// Проверяем состояние соединения перед каждым запросом
 			if conn.IsClosed() {
 				log.Info().
 					Str("clientID", conn.GetClientID()).
@@ -357,29 +348,26 @@ func (sm *SubscriptionManager) streamOrderBook(ctx context.Context, conn *Connec
 				return
 			}
 
-			timeRange := "-30s"
-			if !lastTimestamp.IsZero() {
-				timeRange = fmt.Sprintf("%s", lastTimestamp.Add(time.Nanosecond).Format(time.RFC3339Nano))
+			// Очищаем предыдущее состояние
+			orderBookState = map[string]map[float64]float64{
+				"bid": make(map[float64]float64),
+				"ask": make(map[float64]float64),
 			}
 
+			// Запрос к InfluxDB
 			query := fmt.Sprintf(`
 from(bucket:"%s")
-    |> range(start: %s)
+    |> range(start: -1s)
     |> filter(fn: (r) => r["_measurement"] == "orderbook")
     |> filter(fn: (r) => r["exchange"] == "%s")
     |> filter(fn: (r) => r["trading_pair"] == "%s")
-    |> group(columns: ["side"])
-    |> pivot(rowKey: ["_time", "side"], columnKey: ["_field"], valueColumn: "_value")
-    |> filter(fn: (r) => exists r.price and exists r.volume)
-    |> yield(name: "orderbook")
+    |> pivot(rowKey:["_time", "_start", "_stop", "exchange", "trading_pair", "side"], columnKey: ["_field"], valueColumn: "_value")
 `,
-				sm.influxClient.GetBucket("orderbook"),
-				timeRange,
+				"trading_orderbook",
 				sub.Exchange,
 				sub.TradingPair,
 			)
 
-			// Обрабатываем возможные ошибки при получении данных
 			result, err := sm.influxClient.GetQueryAPI().Query(streamCtx, query)
 			if err != nil {
 				log.Error().
@@ -389,85 +377,34 @@ from(bucket:"%s")
 				continue
 			}
 
-			var newMaxTimestamp time.Time
-			updatedEntries := 0
-
-			// Собираем результаты в безопасном режиме
+			// Обрабатываем результаты
 			func() {
-				defer result.Close() // Гарантируем закрытие результата
+				defer result.Close()
 
 				for result.Next() {
-					// Проверяем состояние соединения и контекста
 					if conn.IsClosed() || streamCtx.Err() != nil {
 						return
 					}
 
 					record := result.Record()
-					recordTime := record.Time()
+					side := record.ValueByKey("side").(string)
+					price := record.ValueByKey("price").(float64)
+					volume := record.ValueByKey("volume").(float64)
 
-					if recordTime.After(newMaxTimestamp) {
-						newMaxTimestamp = recordTime
-					}
-
-					// Безопасное извлечение значений
-					side, ok := record.ValueByKey("side").(string)
-					if !ok {
-						continue
-					}
-
-					price, ok := record.ValueByKey("price").(float64)
-					if !ok {
-						continue
-					}
-
-					volume, ok := record.ValueByKey("volume").(float64)
-					if !ok {
-						continue
-					}
-
-					// Нормализуем сторону
-					normalizedSide := strings.ToLower(side)
-					if normalizedSide != "bid" && normalizedSide != "ask" {
-						continue
-					}
-
-					// Обновляем состояние
+					// Фильтруем нулевые объемы
 					if volume > 0 {
-						orderBookState[normalizedSide][price] = volume
-					} else {
-						delete(orderBookState[normalizedSide], price)
+						orderBookState[side][price] = volume
 					}
-
-					updatedEntries++
 				}
 
-				// Проверяем ошибку после обработки результатов
 				if err := result.Err(); err != nil {
 					log.Error().
 						Err(err).
 						Str("clientID", conn.GetClientID()).
 						Msg("Error in order book query results")
+					return
 				}
 			}()
-
-			// Обновляем временную метку
-			if !newMaxTimestamp.IsZero() {
-				lastTimestamp = newMaxTimestamp
-			}
-
-			log.Debug().
-				Int("updatedEntries", updatedEntries).
-				Str("clientID", conn.GetClientID()).
-				Msg("Order book state updated")
-
-		case <-updateTicker.C:
-			// Проверяем состояние соединения перед отправкой
-			if conn.IsClosed() {
-				log.Info().
-					Str("clientID", conn.GetClientID()).
-					Msg("Connection closed, stopping order book stream")
-				return
-			}
 
 			// Пропускаем отправку, если книга пуста
 			if len(orderBookState["bid"]) == 0 && len(orderBookState["ask"]) == 0 {
@@ -479,45 +416,59 @@ from(bucket:"%s")
 			bids := make([][]float64, 0, len(orderBookState["bid"]))
 			asks := make([][]float64, 0, len(orderBookState["ask"]))
 
+			// Собираем цены в слайсы для сортировки
 			for price, volume := range orderBookState["bid"] {
-				bids = append(bids, []float64{price, volume})
+			    bids = append(bids, []float64{price, volume})
 			}
-			sort.Slice(bids, func(i, j int) bool {
-				return bids[i][0] > bids[j][0]
-			})
-
 			for price, volume := range orderBookState["ask"] {
-				asks = append(asks, []float64{price, volume})
+			    asks = append(asks, []float64{price, volume})
 			}
+
+			// Сортируем цены
+			sort.Slice(bids, func(i, j int) bool {
+			    return bids[i][0] > bids[j][0] // По убыванию для бидов
+			})
 			sort.Slice(asks, func(i, j int) bool {
-				return asks[i][0] < asks[j][0]
+			    return asks[i][0] < asks[j][0] // По возрастанию для асков
 			})
 
-			// Ограничиваем количество уровней
+			// Аккумулируем объемы
+			accumulatedBids := make([][]float64, len(bids))
+			var totalBidVolume float64
+			for i := 0; i < len(bids); i++ { // Аккумулируем от высоких цен к низким для бидов
+			    totalBidVolume += bids[i][1]
+			    accumulatedBids[i] = []float64{bids[i][0], totalBidVolume}
+			}
+
+			accumulatedAsks := make([][]float64, len(asks))
+			var totalAskVolume float64
+			for i := 0; i < len(asks); i++ { // Аккумулируем от низких цен к высоким для асков
+			    totalAskVolume += asks[i][1]
+			    accumulatedAsks[i] = []float64{asks[i][0], totalAskVolume}
+			}
+
+			// Ограничиваем количество уровней один раз в конце
 			maxLevels := 100
-			if len(bids) > maxLevels {
-				bids = bids[:maxLevels]
+			if len(accumulatedBids) > maxLevels {
+			    accumulatedBids = accumulatedBids[:maxLevels]
 			}
-			if len(asks) > maxLevels {
-				asks = asks[:maxLevels]
-			}
-
-			// Создаем сообщение
-			orderBookData := struct {
-				Bids [][]float64 `json:"bids"`
-				Asks [][]float64 `json:"asks"`
-			}{
-				Bids: bids,
-				Asks: asks,
+			if len(accumulatedAsks) > maxLevels {
+			    accumulatedAsks = accumulatedAsks[:maxLevels]
 			}
 
+			// Отправляем сообщение
 			msg := models.WSMessage{
-				Type:      models.WSTypeOrderBook,
-				Timestamp: time.Now().Format(time.RFC3339),
-				Data:      orderBookData,
+			    Type:      models.WSTypeOrderBook,
+			    Timestamp: time.Now().Format(time.RFC3339),
+			    Data: struct {
+			        Bids [][]float64 `json:"bids"`
+			        Asks [][]float64 `json:"asks"`
+			    }{
+			        Bids: accumulatedBids,
+			        Asks: accumulatedAsks,
+			    },
 			}
 
-			// Отправляем сообщение с проверкой на ошибки
 			if err := conn.SendMessage(msg); err != nil {
 				log.Error().
 					Err(err).
