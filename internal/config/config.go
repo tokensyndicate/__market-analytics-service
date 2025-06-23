@@ -7,8 +7,9 @@ import (
 )
 
 type Config struct {
-	Server   ServerConfig   `mapstructure:"server"`
-	InfluxDB InfluxDBConfig `mapstructure:"influxdb"`
+	Server         ServerConfig         `mapstructure:"server"`
+	InfluxDB       InfluxDBConfig       `mapstructure:"influxdb"`
+	MarketAnalysis MarketAnalysisConfig `mapstructure:"market_analysis"`
 }
 
 type ServerConfig struct {
@@ -25,9 +26,20 @@ type InfluxDBConfig struct {
 }
 
 type Buckets struct {
-	Candles      string `mapstructure:"candles"`
-	OrderBook    string `mapstructure:"orderbook"`
-	OrderBookAgg string `mapstructure:"orderbook_agg"`
+	Candles        string `mapstructure:"candles"`
+	OrderBook      string `mapstructure:"orderbook"`
+	OrderBookAgg   string `mapstructure:"orderbook_agg"`
+	MarketAnalysis string `mapstructure:"market_analysis"`
+}
+
+// MarketAnalysisConfig defines settings for market maker analysis
+type MarketAnalysisConfig struct {
+	Enabled             bool    `mapstructure:"enabled"`
+	TimeWindowMinutes   int     `mapstructure:"time_window_minutes"`
+	MinOrderBookDepth   int     `mapstructure:"min_orderbook_depth"`
+	MinCandleCount      int     `mapstructure:"min_candle_count"`
+	ConfidenceThreshold float64 `mapstructure:"confidence_threshold"`
+	AnalysisInterval    int     `mapstructure:"analysis_interval_minutes"`
 }
 
 func Load() (*Config, error) {
@@ -40,6 +52,14 @@ func Load() (*Config, error) {
 	viper.SetDefault("server.host", "0.0.0.0")
 	viper.SetDefault("server.http_port", 8080)
 	viper.SetDefault("server.ws_port", 8081)
+	
+	// Market analysis defaults
+	viper.SetDefault("market_analysis.enabled", true)
+	viper.SetDefault("market_analysis.time_window_minutes", 60)
+	viper.SetDefault("market_analysis.min_orderbook_depth", 10)
+	viper.SetDefault("market_analysis.min_candle_count", 20)
+	viper.SetDefault("market_analysis.confidence_threshold", 0.7)
+	viper.SetDefault("market_analysis.analysis_interval_minutes", 15)
 
 	// Support environment variables
 	viper.AutomaticEnv()
@@ -53,6 +73,9 @@ func Load() (*Config, error) {
 	viper.BindEnv("influxdb.token", "TS_ANALYTICS_INFLUXDB_TOKEN")
 	viper.BindEnv("influxdb.org", "TS_ANALYTICS_INFLUXDB_ORG")
 	viper.BindEnv("influxdb.bucket", "TS_ANALYTICS_INFLUXDB_BUCKET")
+	viper.BindEnv("market_analysis.enabled", "TS_ANALYTICS_MARKET_ANALYSIS_ENABLED")
+	viper.BindEnv("market_analysis.time_window_minutes", "TS_ANALYTICS_MARKET_ANALYSIS_WINDOW")
+	viper.BindEnv("market_analysis.confidence_threshold", "TS_ANALYTICS_MARKET_ANALYSIS_CONFIDENCE")
 
 	if err := viper.ReadInConfig(); err != nil {
 		// Ignore if config file not found
@@ -93,5 +116,11 @@ func validateConfig(cfg *Config) error {
 	if cfg.InfluxDB.Buckets.OrderBookAgg == "" {
 		return fmt.Errorf("influxdb orderbook aggregation bucket is required")
 	}
+	
+	// Set default market analysis bucket if not specified
+	if cfg.InfluxDB.Buckets.MarketAnalysis == "" {
+		cfg.InfluxDB.Buckets.MarketAnalysis = "market_analysis"
+	}
+	
 	return nil
 }

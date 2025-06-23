@@ -91,7 +91,7 @@ func (sm *SubscriptionManager) handleSubscription(ctx context.Context, conn *Con
 
 	// Создаем отдельный контекст для этой подписки
 	subCtx, cancel := context.WithCancel(ctx)
-	conn.AddCancelFunc(cancel)
+	conn.AddCancelFunc(sub, cancel)
 
 	switch sub.Type {
 	case models.SubTypeCandles:
@@ -183,9 +183,12 @@ func (sm *SubscriptionManager) streamCandles(ctx context.Context, conn *Connecti
 			candleData := transformer.TransformCandles(data)
 
 			msg := models.WSMessage{
-				Type:      models.WSTypeCandles,
-				Timestamp: now.Format(time.RFC3339),
-				Data:      candleData,
+				Type:        models.WSTypeCandles,
+				Exchange:    sub.Exchange,
+				TradingPair: sub.TradingPair,
+				Interval:    sub.Interval,
+				Timestamp:   now.Format(time.RFC3339),
+				Data:        candleData,
 			}
 
 			if err := conn.SendMessage(msg); err != nil {
@@ -418,55 +421,58 @@ from(bucket:"%s")
 
 			// Собираем цены в слайсы для сортировки
 			for price, volume := range orderBookState["bid"] {
-			    bids = append(bids, []float64{price, volume})
+				bids = append(bids, []float64{price, volume})
 			}
 			for price, volume := range orderBookState["ask"] {
-			    asks = append(asks, []float64{price, volume})
+				asks = append(asks, []float64{price, volume})
 			}
 
 			// Сортируем цены
 			sort.Slice(bids, func(i, j int) bool {
-			    return bids[i][0] > bids[j][0] // По убыванию для бидов
+				return bids[i][0] > bids[j][0] // По убыванию для бидов
 			})
 			sort.Slice(asks, func(i, j int) bool {
-			    return asks[i][0] < asks[j][0] // По возрастанию для асков
+				return asks[i][0] < asks[j][0] // По возрастанию для асков
 			})
 
 			// Аккумулируем объемы
 			accumulatedBids := make([][]float64, len(bids))
 			var totalBidVolume float64
 			for i := 0; i < len(bids); i++ { // Аккумулируем от высоких цен к низким для бидов
-			    totalBidVolume += bids[i][1]
-			    accumulatedBids[i] = []float64{bids[i][0], totalBidVolume}
+				totalBidVolume += bids[i][1]
+				accumulatedBids[i] = []float64{bids[i][0], totalBidVolume}
 			}
 
 			accumulatedAsks := make([][]float64, len(asks))
 			var totalAskVolume float64
 			for i := 0; i < len(asks); i++ { // Аккумулируем от низких цен к высоким для асков
-			    totalAskVolume += asks[i][1]
-			    accumulatedAsks[i] = []float64{asks[i][0], totalAskVolume}
+				totalAskVolume += asks[i][1]
+				accumulatedAsks[i] = []float64{asks[i][0], totalAskVolume}
 			}
 
 			// Ограничиваем количество уровней один раз в конце
 			maxLevels := 100
 			if len(accumulatedBids) > maxLevels {
-			    accumulatedBids = accumulatedBids[:maxLevels]
+				accumulatedBids = accumulatedBids[:maxLevels]
 			}
 			if len(accumulatedAsks) > maxLevels {
-			    accumulatedAsks = accumulatedAsks[:maxLevels]
+				accumulatedAsks = accumulatedAsks[:maxLevels]
 			}
 
 			// Отправляем сообщение
 			msg := models.WSMessage{
-			    Type:      models.WSTypeOrderBook,
-			    Timestamp: time.Now().Format(time.RFC3339),
-			    Data: struct {
-			        Bids [][]float64 `json:"bids"`
-			        Asks [][]float64 `json:"asks"`
-			    }{
-			        Bids: accumulatedBids,
-			        Asks: accumulatedAsks,
-			    },
+				Type:        models.WSTypeOrderBook,
+				Exchange:    sub.Exchange,
+				TradingPair: sub.TradingPair,
+				Interval:    sub.Interval,
+				Timestamp:   time.Now().Format(time.RFC3339),
+				Data: struct {
+					Bids [][]float64 `json:"bids"`
+					Asks [][]float64 `json:"asks"`
+				}{
+					Bids: accumulatedBids,
+					Asks: accumulatedAsks,
+				},
 			}
 
 			if err := conn.SendMessage(msg); err != nil {
@@ -574,9 +580,12 @@ func (sm *SubscriptionManager) streamOrderBookAgg(ctx context.Context, conn *Con
 				}
 
 				msg := models.WSMessage{
-					Type:      models.WSTypeOrderBookAgg,
-					Timestamp: time.Now().Format(time.RFC3339),
-					Data:      aggData,
+					Type:        models.WSTypeOrderBookAgg,
+					Exchange:    sub.Exchange,
+					TradingPair: sub.TradingPair,
+					Interval:    sub.Interval,
+					Timestamp:   time.Now().Format(time.RFC3339),
+					Data:        aggData,
 				}
 
 				if err := conn.SendMessage(msg); err != nil {
@@ -691,9 +700,12 @@ func (sm *SubscriptionManager) streamOrderBookAgg(ctx context.Context, conn *Con
 					// Отправляем только если данные изменились
 					if dataHash != lastSentDataHash {
 						msg := models.WSMessage{
-							Type:      models.WSTypeOrderBookAgg,
-							Timestamp: currentTime.Format(time.RFC3339),
-							Data:      aggData,
+							Type:        models.WSTypeOrderBookAgg,
+							Exchange:    sub.Exchange,
+							TradingPair: sub.TradingPair,
+							Interval:    sub.Interval,
+							Timestamp:   currentTime.Format(time.RFC3339),
+							Data:        aggData,
 						}
 
 						if err := conn.SendMessage(msg); err != nil {
@@ -786,9 +798,12 @@ func (sm *SubscriptionManager) handleCandlesSubscription(ctx context.Context, co
 	// Отправляем начальные данные
 	candleData := transformer.TransformCandles(data)
 	initialMsg := models.WSMessage{
-		Type:      models.WSTypeCandles,
-		Timestamp: time.Now().Format(time.RFC3339),
-		Data:      candleData,
+		Type:        models.WSTypeCandles,
+		Exchange:    sub.Exchange,
+		TradingPair: sub.TradingPair,
+		Interval:    sub.Interval,
+		Timestamp:   time.Now().Format(time.RFC3339),
+		Data:        candleData,
 	}
 
 	if err := conn.SendMessage(initialMsg); err != nil {
@@ -847,9 +862,12 @@ func (sm *SubscriptionManager) handleCandlesSubscription(ctx context.Context, co
 						Msg("Received new candle data")
 
 					updateMsg := models.WSMessage{
-						Type:      models.WSTypeCandles,
-						Timestamp: time.Now().Format(time.RFC3339),
-						Data:      transformer.TransformCandles(newData),
+						Type:        models.WSTypeCandles,
+						Exchange:    sub.Exchange,
+						TradingPair: sub.TradingPair,
+						Interval:    sub.Interval,
+						Timestamp:   time.Now().Format(time.RFC3339),
+						Data:        transformer.TransformCandles(newData),
 					}
 
 					if err := conn.SendMessage(updateMsg); err != nil {
@@ -894,9 +912,12 @@ func (sm *SubscriptionManager) handleOrderBookSubscription(ctx context.Context, 
 
 	orderBookData := transformer.TransformOrderBook(data)
 	msg := models.WSMessage{
-		Type:      models.WSTypeOrderBook,
-		Timestamp: time.Now().Format(time.RFC3339),
-		Data:      orderBookData,
+		Type:        models.WSTypeOrderBook,
+		Exchange:    sub.Exchange,
+		TradingPair: sub.TradingPair,
+		Interval:    sub.Interval,
+		Timestamp:   time.Now().Format(time.RFC3339),
+		Data:        orderBookData,
 	}
 
 	if err := conn.SendMessage(msg); err != nil {
@@ -923,9 +944,12 @@ func (sm *SubscriptionManager) handleOrderBookSubscription(ctx context.Context, 
 
 				if len(newData) > 0 {
 					updateMsg := models.WSMessage{
-						Type:      models.WSTypeOrderBook,
-						Timestamp: time.Now().Format(time.RFC3339),
-						Data:      transformer.TransformOrderBook(newData),
+						Type:        models.WSTypeOrderBook,
+						Exchange:    sub.Exchange,
+						TradingPair: sub.TradingPair,
+						Interval:    sub.Interval,
+						Timestamp:   time.Now().Format(time.RFC3339),
+						Data:        transformer.TransformOrderBook(newData),
 					}
 
 					if err := conn.SendMessage(updateMsg); err != nil {
@@ -959,9 +983,12 @@ func (sm *SubscriptionManager) handleOrderBookAggSubscription(ctx context.Contex
 
 	aggData := transformer.TransformOrderBookAgg(data)
 	msg := models.WSMessage{
-		Type:      models.WSTypeOrderBookAgg,
-		Timestamp: time.Now().Format(time.RFC3339),
-		Data:      aggData,
+		Type:        models.WSTypeOrderBookAgg,
+		Exchange:    sub.Exchange,
+		TradingPair: sub.TradingPair,
+		Interval:    sub.Interval,
+		Timestamp:   time.Now().Format(time.RFC3339),
+		Data:        aggData,
 	}
 
 	if err := conn.SendMessage(msg); err != nil {
@@ -988,9 +1015,12 @@ func (sm *SubscriptionManager) handleOrderBookAggSubscription(ctx context.Contex
 
 				if len(newData) > 0 {
 					updateMsg := models.WSMessage{
-						Type:      models.WSTypeOrderBookAgg,
-						Timestamp: time.Now().Format(time.RFC3339),
-						Data:      transformer.TransformOrderBookAgg(newData),
+						Type:        models.WSTypeOrderBookAgg,
+						Exchange:    sub.Exchange,
+						TradingPair: sub.TradingPair,
+						Interval:    sub.Interval,
+						Timestamp:   time.Now().Format(time.RFC3339),
+						Data:        transformer.TransformOrderBookAgg(newData),
 					}
 
 					if err := conn.SendMessage(updateMsg); err != nil {
@@ -1021,7 +1051,7 @@ func (sm *SubscriptionManager) ProcessSubscriptionRequest(conn *Connection, req 
 		for _, sub := range req.Subscriptions {
 			// Создаем контекст с отменой для каждой подписки
 			subCtx, cancel := context.WithCancel(context.Background())
-			conn.AddCancelFunc(cancel)
+			conn.AddCancelFunc(sub, cancel)
 
 			switch sub.Type {
 			case models.SubTypeCandles:
@@ -1038,6 +1068,9 @@ func (sm *SubscriptionManager) ProcessSubscriptionRequest(conn *Connection, req 
 				continue
 			}
 
+			// Добавляем подписку в менеджер
+			sm.addSubscription(conn, sub)
+
 			log.Info().
 				Str("clientID", conn.GetClientID()).
 				Str("type", string(sub.Type)).
@@ -1047,15 +1080,37 @@ func (sm *SubscriptionManager) ProcessSubscriptionRequest(conn *Connection, req 
 		}
 
 	case "unsubscribe":
-		// Закрываем соединение и отменяем все подписки
-		conn.Close()
+		for _, sub := range req.Subscriptions {
+			// Находим и отменяем конкретные подписки
+			sm.removeSubscription(conn, sub)
 
-		// Удаляем соединение из менеджера
-		sm.RemoveConnection(conn)
+			// Отправляем подтверждение отписки
+			msg := models.WSMessage{
+				Type:        models.WSTypeUnsubscribe,
+				Exchange:    sub.Exchange,
+				TradingPair: sub.TradingPair,
+				Timestamp:   time.Now().Format(time.RFC3339),
+				Data: models.SubscriptionResponse{
+					Success: true,
+					Type:    sub.Type,
+				},
+			}
 
-		log.Info().
-			Str("clientID", conn.GetClientID()).
-			Msg("All subscriptions cancelled and connection closed")
+			if err := conn.SendMessage(msg); err != nil {
+				log.Error().
+					Err(err).
+					Str("clientID", conn.GetClientID()).
+					Str("type", string(sub.Type)).
+					Msg("Failed to send unsubscribe confirmation")
+			}
+
+			log.Info().
+				Str("clientID", conn.GetClientID()).
+				Str("type", string(sub.Type)).
+				Str("exchange", sub.Exchange).
+				Str("tradingPair", sub.TradingPair).
+				Msg("Subscription cancelled")
+		}
 
 	default:
 		return fmt.Errorf("unknown action: %s", req.Action)

@@ -13,23 +13,34 @@ import (
 )
 
 type Connection struct {
-	conn          *websocket.Conn
-	subscriptions map[models.SubscriptionType][]models.Subscription
-	clientID      string
-	manager       *SubscriptionManager
-	mu            sync.RWMutex
-	cancelFuncs   []context.CancelFunc
-	closed        atomic.Bool
+	conn                *websocket.Conn
+	subscriptions       map[models.SubscriptionType][]models.Subscription
+	subscriptionCancels map[string]context.CancelFunc
+	clientID            string
+	manager             *SubscriptionManager
+	mu                  sync.RWMutex
+	cancelFuncs         []context.CancelFunc
+	closed              atomic.Bool
 }
 
 func NewConnection(conn *websocket.Conn, clientID string, manager *SubscriptionManager) *Connection {
 	return &Connection{
-		conn:          conn,
-		subscriptions: make(map[models.SubscriptionType][]models.Subscription),
-		clientID:      clientID,
-		manager:       manager,
-		cancelFuncs:   make([]context.CancelFunc, 0),
+		conn:                conn,
+		subscriptions:       make(map[models.SubscriptionType][]models.Subscription),
+		subscriptionCancels: make(map[string]context.CancelFunc),
+		clientID:            clientID,
+		manager:             manager,
+		cancelFuncs:         make([]context.CancelFunc, 0),
 	}
+}
+
+func createSubscriptionKey(sub models.Subscription) string {
+	return fmt.Sprintf("%s:%s:%s:%s",
+		string(sub.Type),
+		sub.Exchange,
+		sub.TradingPair,
+		sub.Interval,
+	)
 }
 
 func (c *Connection) Start() {
@@ -114,10 +125,23 @@ func (c *Connection) SendMessage(msg interface{}) error {
 	return nil
 }
 
-func (c *Connection) AddCancelFunc(cancel context.CancelFunc) {
+func (c *Connection) AddCancelFunc(sub models.Subscription, cancel context.CancelFunc) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.cancelFuncs = append(c.cancelFuncs, cancel)
+
+	key := createSubscriptionKey(sub)
+	c.subscriptionCancels[key] = cancel
+}
+
+func (c *Connection) CancelSubscription(sub models.Subscription) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	key := createSubscriptionKey(sub)
+	if cancel, exists := c.subscriptionCancels[key]; exists {
+		cancel()
+		delete(c.subscriptionCancels, key)
+	}
 }
 
 func (c *Connection) Close() {

@@ -13,11 +13,13 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
+	"market-analytics-service/internal/analysis"
 	"market-analytics-service/internal/config"
 	"market-analytics-service/internal/handler"
 	"market-analytics-service/internal/influx"
 	"market-analytics-service/internal/service"
 	"market-analytics-service/internal/ws"
+	"market-analytics-service/pkg/models"
 )
 
 func main() {
@@ -37,9 +39,10 @@ func main() {
 		cfg.InfluxDB.Token,
 		cfg.InfluxDB.Org,
 		influx.Buckets{
-			Candles:      cfg.InfluxDB.Buckets.Candles,
-			OrderBook:    cfg.InfluxDB.Buckets.OrderBook,
-			OrderBookAgg: cfg.InfluxDB.Buckets.OrderBookAgg,
+			Candles:        cfg.InfluxDB.Buckets.Candles,
+			OrderBook:      cfg.InfluxDB.Buckets.OrderBook,
+			OrderBookAgg:   cfg.InfluxDB.Buckets.OrderBookAgg,
+			MarketAnalysis: cfg.InfluxDB.Buckets.MarketAnalysis,
 		},
 	)
 	if err != nil {
@@ -54,15 +57,41 @@ func main() {
 	// Создаем менеджер подписок
 	subscriptionManager := ws.NewSubscriptionManager(influxClient)
 
+	// Create market maker analysis manager if enabled
+	var analysisManager *analysis.AnalysisManager
+	if cfg.MarketAnalysis.Enabled {
+		analysisConfig := models.MMAnalysisConfig{
+			MinOrderBookDepth:   cfg.MarketAnalysis.MinOrderBookDepth,
+			MinCandleCount:      cfg.MarketAnalysis.MinCandleCount,
+			ConfidenceThreshold: cfg.MarketAnalysis.ConfidenceThreshold,
+			TimeWindowMinutes:   cfg.MarketAnalysis.TimeWindowMinutes,
+		}
+		analysisManager = analysis.NewAnalysisManager(influxClient, analysisConfig)
+		
+		// Start analysis in background if enabled
+		analysisCtx, _ := context.WithCancel(context.Background())
+		if err := analysisManager.Start(analysisCtx); err != nil {
+			log.Error().Err(err).Msg("Failed to start market maker analysis")
+		} else {
+			log.Info().Msg("Market maker analysis started")
+		}
+	}
+
 	// Создаем обработчики
 	httpHandler := handler.NewHTTPHandler(analyticsService)
 	wsHandler := handler.NewWSHandler(subscriptionManager)
+	analysisHandler := handler.NewAnalysisHandler(analysisManager)
 
 	// Setup router
 	router := mux.NewRouter()
 
 	// HTTP routes
 	httpHandler.Setup(router)
+	
+	// Analysis routes
+	if analysisManager != nil {
+		analysisHandler.Setup(router)
+	}
 
 	// WebSocket route
 	router.HandleFunc("/ws", wsHandler.HandleWS)

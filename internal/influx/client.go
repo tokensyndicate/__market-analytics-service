@@ -22,10 +22,14 @@ type Client struct {
 	buckets  Buckets
 }
 
+// Point represents an InfluxDB data point
+type Point influxdb2.Point
+
 type Buckets struct {
-	Candles      string
-	OrderBook    string
-	OrderBookAgg string
+	Candles        string
+	OrderBook      string
+	OrderBookAgg   string
+	MarketAnalysis string
 }
 
 // NewClient creates and initializes a new InfluxDB client
@@ -54,6 +58,8 @@ func (c *Client) GetBucket(dataType string) string {
 		return c.buckets.OrderBook
 	case "orderbook_agg":
 		return c.buckets.OrderBookAgg
+	case "market_analysis":
+		return c.buckets.MarketAnalysis
 	default:
 		return ""
 	}
@@ -72,6 +78,16 @@ func (c *Client) GetOrg() string {
 // Close releases the client resources
 func (c *Client) Close() {
 	c.client.Close()
+}
+
+// Client returns the underlying InfluxDB client
+func (c *Client) Client() influxdb2.Client {
+	return c.client
+}
+
+// NewPoint creates a new InfluxDB data point
+func NewPoint(measurement string, tags map[string]string, fields map[string]interface{}, timestamp time.Time) Point {
+	return influxdb2.NewPoint(measurement, tags, fields, timestamp)
 }
 
 // GetHistoricalData retrieves historical data for a specific time period

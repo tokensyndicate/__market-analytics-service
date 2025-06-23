@@ -11,3 +11,12 @@ influxdb:
     candles: "trading_candles"
     orderbook: "trading_orderbook"
     orderbook_agg: "trading_orderbook_agg"
+    market_analysis: "market_analysis"
+
+market_analysis:
+  enabled: true
+  time_window_minutes: 60
+  min_orderbook_depth: 10
+  min_candle_count: 20
+  confidence_threshold: 0.7
+  analysis_interval_minutes: 15
